@@ -19,23 +19,33 @@ struct Episode {
 
 struct App {
     episodes: Vec<Episode>,
-    selected_index: usize,
+    list_state: ListState,
 }
 
 impl App {
     fn new(episodes: Vec<Episode>) -> App {
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
         App {
             episodes,
-            selected_index: 0,
+            list_state,
         }
     }
 
     fn next(&mut self) {
-        self.selected_index = (self.selected_index + 1).min(self.episodes.len() - 1);
+        let i = match self.list_state.selected() {
+            Some(i) => (i + 1).min(self.episodes.len() - 1),
+            None => 0,
+        };
+        self.list_state.select(Some(i));
     }
 
     fn previous(&mut self) {
-        self.selected_index = self.selected_index.saturating_sub(1);
+        let i = match self.list_state.selected() {
+            Some(i) => i.saturating_sub(1),
+            None => 0,
+        };
+        self.list_state.select(Some(i));
     }
 }
 
@@ -85,41 +95,43 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
         terminal.draw(|f| ui(f, app))?;
 
         if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Char('q') => return Ok(()),
-                KeyCode::Up => app.previous(),
-                KeyCode::Down => app.next(),
-                _ => {}
+            // Only respond to key press events, not key release
+            if key.kind == event::KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Up => app.previous(),
+                    KeyCode::Down => app.next(),
+                    _ => {}
+                }
             }
         }
     }
 }
 
-fn ui(f: &mut Frame, app: &App) {
-    // Convert episodes to ListItems
+fn ui(f: &mut Frame, app: &mut App) {
     let items: Vec<ListItem> = app
         .episodes
         .iter()
-        .map(|episode| {
+        .enumerate()
+        .map(|(i, episode)| {
             let title = episode.title.as_deref().unwrap_or("Untitled Episode");
             let date = episode.pub_date
                 .map(|d| d.format("%d %b %Y").to_string())
                 .unwrap_or_else(|| "Unknown date".to_string());
             
-            ListItem::new(format!("{} ({})", title, date))
+            ListItem::new(format!("{}: {} ({})", i, title, date))
         })
         .collect();
 
-    // Create a List widget
+    let selected_text = format!("Selected: {:?}", app.list_state.selected());
     let list = List::new(items)
-        .block(Block::default().title("Episodes").borders(Borders::ALL))
+        .block(Block::default().title(selected_text).borders(Borders::ALL))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
 
-    // Render the list widget
     f.render_stateful_widget(
         list,
         f.area(),
-        &mut ListState::default().with_selected(Some(app.selected_index))
+        &mut app.list_state
     );
 }
