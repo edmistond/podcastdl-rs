@@ -101,15 +101,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<()> {
+    let mut redraw = true;
+
     loop {
-        terminal.draw(|f| ui(f, app))?;
+        if redraw {
+            terminal.draw(|frame| {
+                ui(frame, app);
+            })?;
+            redraw = false;  // Reset after drawing
+        }
 
         if let Event::Key(key) = event::read()? {
             if key.kind == event::KeyEventKind::Press {
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Up => app.previous(),
-                    KeyCode::Down => app.next(),
+                    KeyCode::Up => {
+                        app.previous();
+                        redraw = true;
+                    }
+                    KeyCode::Down => {
+                        app.next();
+                        redraw = true;
+                    }
                     KeyCode::Char('d') => {
                         match download_selected_episode(app, terminal) {
                             Ok(_) => {} // Status message is already set in the function
@@ -118,6 +131,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                                 terminal.draw(|f| ui(f, app))?;
                             }
                         }
+                    }
+                    KeyCode::Char('x') => {
+                        // Cancel all downloads
+                        app.download_progress = None;
+                        redraw = true;
                     }
                     _ => {}
                 }
