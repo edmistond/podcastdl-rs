@@ -14,7 +14,6 @@ use curl;
 use feed_rs::model::Feed;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::sync::mpsc;
 
 #[derive(Debug)]
 struct Episode {
@@ -147,75 +146,89 @@ fn download_selected_episode(app: &mut App, terminal: &mut Terminal<impl Backend
     easy.max_redirections(20)?;
     easy.progress(true)?;
 
-    let mut file = std::fs::File::create(&filename)?;
+    let file = std::fs::File::create(&filename)?;
+    let file = std::sync::Mutex::new(file);
     
     app.status_message = Some(format!("Downloading {}... 0% (press 'x' to cancel)", filename));
     terminal.draw(|f| ui(f, app))?;
     
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let progress_flag = cancel_flag.clone();
-    let cancel_flag_clone = cancel_flag.clone();
     
-    // Create a channel for progress updates
-    let (tx, rx) = mpsc::channel();
-    let filename_clone = filename.clone();
-    
-    {
-        let mut transfer = easy.transfer();
-        let tx = tx.clone();
-        
-        transfer.progress_function(move |total, current, _, _| {
-            // Check if we should cancel
-            if progress_flag.load(Ordering::Relaxed) {
-                return false;
+    // Set up progress callback
+    easy.progress_function(move |_total, _current, _, _| {
+        if progress_flag.load(Ordering::Relaxed) {
+            return false;
+        }
+        true
+    })?;
+
+    // Set up write callback using thread-safe file handle
+    let file_ref = Arc::new(file);
+    let file_ref_clone = file_ref.clone();
+    easy.write_function(move |data| {
+        if let Ok(mut file) = file_ref_clone.lock() {
+            match file.write_all(data) {
+                Ok(_) => Ok(data.len()),
+                Err(_) => Ok(0)
             }
+        } else {
+            Ok(0)
+        }
+    })?;
 
-            if total > 0.0 {
-                let percentage = (current / total * 100.0) as i32;
-                let _ = tx.send(percentage);
-            }
-            true
-        })?;
-
-        transfer.write_function(|data| {
-            file.write_all(data).unwrap();
-            Ok(data.len())
-        })?;
-
-        // Spawn a thread to check for 'x' key press
-        std::thread::spawn(move || {
-            while !cancel_flag_clone.load(Ordering::Relaxed) {
-                if let Ok(Event::Key(key)) = event::read() {
-                    if key.kind == event::KeyEventKind::Press && key.code == KeyCode::Char('x') {
-                        cancel_flag_clone.store(true, Ordering::Relaxed);
-                        break;
+    // Loop to handle keyboard events while downloading
+    let _result: Result<(), io::Error> = loop {
+        // Check for keyboard events
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == event::KeyEventKind::Press {
+                    match key.code {
+                        KeyCode::Char('x') => {
+                            cancel_flag.store(true, Ordering::Relaxed);
+                            app.status_message = Some(format!("Download of {} cancelled", filename));
+                            terminal.draw(|f| ui(f, app))?;
+                            std::fs::remove_file(&filename)?;
+                            break Ok(());
+                        }
+                        KeyCode::Up => {
+                            app.previous();
+                            terminal.draw(|f| ui(f, app))?;
+                        }
+                        KeyCode::Down => {
+                            app.next();
+                            terminal.draw(|f| ui(f, app))?;
+                        }
+                        KeyCode::Char('q') => {
+                            cancel_flag.store(true, Ordering::Relaxed);
+                            break Ok(());
+                        }
+                        _ => {}
                     }
                 }
             }
-        });
-
-        // Update UI in the main thread based on progress updates
-        while let Ok(percentage) = rx.try_recv() {
-            app.status_message = Some(format!("Downloading {}... {}% (press 'x' to cancel)", filename_clone, percentage));
-            terminal.draw(|f| ui(f, app))?;
         }
 
-        let result = transfer.perform();
-        
-        if cancel_flag.load(Ordering::Relaxed) {
-            drop(transfer);  // Explicitly drop the transfer before using app and terminal
-            app.status_message = Some(format!("Download of {} cancelled", filename));
-            terminal.draw(|f| ui(f, app))?;
-            // Clean up the partial file
-            std::fs::remove_file(&filename)?;
-            return Ok(());
+        // Try to perform some of the transfer
+        match easy.perform() {
+            Ok(_) => {
+                if !cancel_flag.load(Ordering::Relaxed) {
+                    app.status_message = Some(format!("Downloaded {}", filename));
+                    terminal.draw(|f| ui(f, app))?;
+                }
+                break Ok(());
+            }
+            Err(e) => {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    break Ok(());
+                }
+                app.status_message = Some(format!("Error downloading {}: {}", filename, e));
+                terminal.draw(|f| ui(f, app))?;
+                break Ok(());
+            }
         }
+    };
 
-        result?;
-    }
-
-    app.status_message = Some(format!("Downloaded {}", filename));
-    terminal.draw(|f| ui(f, app))?;
     Ok(())
 }
 
