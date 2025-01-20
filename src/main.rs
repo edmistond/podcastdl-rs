@@ -1,6 +1,3 @@
-use std::fs::File;
-use std::io::BufReader;
-use feed_rs::parser;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, List, ListItem, ListState},
