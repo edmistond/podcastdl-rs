@@ -40,7 +40,7 @@ impl App {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string("feed.xml")?;
+    let content = std::fs::read_to_string("techmeme-ridehome.rss")?;
     let feed = feed_rs::parser::parse(content.as_bytes())?;
     
     let episodes: Vec<Episode> = feed.entries.iter().map(|entry| {
