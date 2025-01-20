@@ -14,6 +14,7 @@ use curl;
 use feed_rs::model::Feed;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use ctrlc;
 
 #[derive(Debug)]
 struct Episode {
@@ -60,6 +61,14 @@ impl App {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Set up ctrl-c handler before entering alternate screen
+    ctrlc::set_handler(move || {
+        // Clean up terminal
+        crossterm::terminal::disable_raw_mode().unwrap();
+        crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen).unwrap();
+        std::process::exit(0);
+    })?;
+
     let content = std::fs::read_to_string("techmeme-ridehome.rss")?;
     let feed = feed_rs::parser::parse(content.as_bytes())?;
     
