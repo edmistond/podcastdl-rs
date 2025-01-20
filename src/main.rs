@@ -14,6 +14,7 @@ use curl;
 use feed_rs::model::Feed;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::mpsc;
 
 #[derive(Debug)]
 struct Episode {
@@ -155,9 +156,13 @@ fn download_selected_episode(app: &mut App, terminal: &mut Terminal<impl Backend
     let progress_flag = cancel_flag.clone();
     let cancel_flag_clone = cancel_flag.clone();
     
+    // Create a channel for progress updates
+    let (tx, rx) = mpsc::channel();
+    let filename_clone = filename.clone();
+    
     {
         let mut transfer = easy.transfer();
-        let filename_clone = filename.clone();
+        let tx = tx.clone();
         
         transfer.progress_function(move |total, current, _, _| {
             // Check if we should cancel
@@ -167,7 +172,7 @@ fn download_selected_episode(app: &mut App, terminal: &mut Terminal<impl Backend
 
             if total > 0.0 {
                 let percentage = (current / total * 100.0) as i32;
-                println!("\rDownloading {}... {}% (press 'x' to cancel)", filename_clone, percentage);
+                let _ = tx.send(percentage);
             }
             true
         })?;
@@ -188,6 +193,12 @@ fn download_selected_episode(app: &mut App, terminal: &mut Terminal<impl Backend
                 }
             }
         });
+
+        // Update UI in the main thread based on progress updates
+        while let Ok(percentage) = rx.try_recv() {
+            app.status_message = Some(format!("Downloading {}... {}% (press 'x' to cancel)", filename_clone, percentage));
+            terminal.draw(|f| ui(f, app))?;
+        }
 
         let result = transfer.perform();
         
