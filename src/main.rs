@@ -126,10 +126,17 @@ fn download_selected_episode(app: &App) -> Result<(), Box<dyn std::error::Error>
     // Use the stored feed instead of reading from file
     let entry = app.feed.entries.get(selected_idx).ok_or("Entry not found")?;
     
-    // Find the first enclosure (attachment) URL
-    let url = entry.links.iter()
-        .find(|link| link.rel.as_deref() == Some("enclosure"))
-        .map(|link| &link.href)
+    // Debug print to see what media we have
+    println!("Media for episode:");
+    for media in &entry.media {
+        println!("  Content: {:?}", media.content);
+    }
+    
+    // Find the first media URL
+    let url = entry.media.iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|c| c.url.as_ref())
+        .next()
         .ok_or("No download URL found")?;
 
     // Create filename from title or use a default
@@ -138,9 +145,9 @@ fn download_selected_episode(app: &App) -> Result<(), Box<dyn std::error::Error>
         .map(|t| sanitize_filename(t))
         .unwrap_or_else(|| format!("episode_{}.mp3", selected_idx));
 
-    // Initialize curl
+    // Initialize curl with the URL as a string
     let mut easy = curl::easy::Easy::new();
-    easy.url(url)?;
+    easy.url(url.as_str())?;  // Convert Url to &str
     easy.follow_location(true)?;
     easy.max_redirections(20)?;
 
@@ -206,17 +213,16 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Get the media filename for the selected episode
     let title = match app.list_state.selected() {
         Some(idx) => {
-            // Use the stored feed instead of reading from file
             app.feed.entries.get(idx)
                 .and_then(|e| {
-                    e.links.iter()
-                        .find(|link| link.rel.as_deref() == Some("enclosure"))
-                        .map(|_| {
-                            let episode = &app.episodes[idx];
-                            episode.title.as_ref()
-                                .map(|t| sanitize_filename(t))
-                                .unwrap_or_else(|| format!("episode_{}.mp3", idx))
-                        })
+                    if e.media.iter().any(|m| !m.content.is_empty()) {
+                        let episode = &app.episodes[idx];
+                        episode.title.as_ref()
+                            .map(|t| sanitize_filename(t))
+                            .or_else(|| Some(format!("episode_{}.mp3", idx)))
+                    } else {
+                        None
+                    }
                 })
                 .unwrap_or_else(|| "No media found".to_string())
         }
