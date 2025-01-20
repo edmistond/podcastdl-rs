@@ -15,6 +15,8 @@ use feed_rs::model::Feed;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use ctrlc;
+use std::path::Path;
+use clap::Parser;
 
 #[derive(Debug)]
 struct Episode {
@@ -60,7 +62,35 @@ impl App {
     }
 }
 
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// RSS feed URL or local file path
+    feed_source: String,
+}
+
+fn fetch_feed_content(source: &str) -> Result<String, Box<dyn std::error::Error>> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let mut easy = curl::easy::Easy::new();
+        easy.url(source)?;
+        let mut content = Vec::new();
+        {
+            let mut transfer = easy.transfer();
+            transfer.write_function(|data| {
+                content.extend_from_slice(data);
+                Ok(data.len())
+            })?;
+            transfer.perform()?;
+        }
+        Ok(String::from_utf8(content)?)
+    } else {
+        Ok(std::fs::read_to_string(source)?)
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
     // Set up ctrl-c handler before entering alternate screen
     ctrlc::set_handler(move || {
         // Clean up terminal
@@ -69,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(0);
     })?;
 
-    let content = std::fs::read_to_string("techmeme-ridehome.rss")?;
+    let content = fetch_feed_content(&cli.feed_source)?;
     let feed = feed_rs::parser::parse(content.as_bytes())?;
     
     let episodes: Vec<Episode> = feed.entries.iter().map(|entry| {
@@ -83,9 +113,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref title) = feed.title {
         println!("Feed Title: {}", title.content);
     }
-
-    // Print each entry's title
-    println!("\nMost Recent 50 Episodes:");
 
     // Setup terminal
     enable_raw_mode()?;
