@@ -26,6 +26,7 @@ struct App {
     list_state: ListState,
     status_message: Option<String>,
     feed: Feed,
+    download_progress: Option<f64>,
 }
 
 impl App {
@@ -37,6 +38,7 @@ impl App {
             list_state,
             status_message: None,
             feed,
+            download_progress: None,
         }
     }
 
@@ -149,16 +151,24 @@ fn download_selected_episode(app: &mut App, terminal: &mut Terminal<impl Backend
     let file = std::fs::File::create(&filename)?;
     let file = std::sync::Mutex::new(file);
     
-    app.status_message = Some(format!("Downloading {}... 0% (press 'x' to cancel)", filename));
+    app.status_message = Some(format!("Downloading {}... (press 'x' to cancel)", filename));
     terminal.draw(|f| ui(f, app))?;
     
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let progress_flag = cancel_flag.clone();
     
-    // Set up progress callback
-    easy.progress_function(move |_total, _current, _, _| {
+    let progress = Arc::new(std::sync::Mutex::new(0.0f64));
+    let progress_clone = progress.clone();
+    
+    // Set up progress callback that only updates the progress value
+    easy.progress_function(move |total, current, _, _| {
         if progress_flag.load(Ordering::Relaxed) {
             return false;
+        }
+        if total > 0.0 {
+            if let Ok(mut p) = progress_clone.lock() {
+                *p = (current / total) * 100.0;
+            }
         }
         true
     })?;
@@ -177,8 +187,17 @@ fn download_selected_episode(app: &mut App, terminal: &mut Terminal<impl Backend
         }
     })?;
 
+    let transfer = easy.transfer();
+
     // Loop to handle keyboard events while downloading
     let _result: Result<(), io::Error> = loop {
+        // Update the UI with current progress
+        if let Ok(p) = progress.lock() {
+            app.download_progress = Some(*p);
+            app.status_message = Some(format!("Downloading {}... {}% (press 'x' to cancel)", filename, *p as u64));
+            terminal.draw(|f| ui(f, app))?;
+        }
+
         // Check for keyboard events
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -187,6 +206,7 @@ fn download_selected_episode(app: &mut App, terminal: &mut Terminal<impl Backend
                         KeyCode::Char('x') => {
                             cancel_flag.store(true, Ordering::Relaxed);
                             app.status_message = Some(format!("Download of {} cancelled", filename));
+                            app.download_progress = None;
                             terminal.draw(|f| ui(f, app))?;
                             std::fs::remove_file(&filename)?;
                             break Ok(());
@@ -209,9 +229,10 @@ fn download_selected_episode(app: &mut App, terminal: &mut Terminal<impl Backend
             }
         }
 
-        // Try to perform some of the transfer
-        match easy.perform() {
-            Ok(_) => {
+        // Perform the transfer
+        match transfer.perform() {
+            Ok(()) => {
+                app.download_progress = None;
                 if !cancel_flag.load(Ordering::Relaxed) {
                     app.status_message = Some(format!("Downloaded {}", filename));
                     terminal.draw(|f| ui(f, app))?;
@@ -219,6 +240,7 @@ fn download_selected_episode(app: &mut App, terminal: &mut Terminal<impl Backend
                 break Ok(());
             }
             Err(e) => {
+                app.download_progress = None;
                 if cancel_flag.load(Ordering::Relaxed) {
                     break Ok(());
                 }
