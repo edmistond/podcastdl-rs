@@ -1,6 +1,6 @@
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
 };
 use crossterm::{
@@ -11,6 +11,7 @@ use crossterm::{
 use std::io::{self, stdout, Write};
 use chrono::{DateTime, Utc};
 use curl;
+use feed_rs::model::Feed;
 
 #[derive(Debug)]
 struct Episode {
@@ -21,15 +22,19 @@ struct Episode {
 struct App {
     episodes: Vec<Episode>,
     list_state: ListState,
+    status_message: Option<String>,
+    feed: Feed,
 }
 
 impl App {
-    fn new(episodes: Vec<Episode>) -> App {
+    fn new(episodes: Vec<Episode>, feed: Feed) -> App {
         let mut list_state = ListState::default();
         list_state.select(Some(0));
         App {
             episodes,
             list_state,
+            status_message: None,
+            feed,
         }
     }
 
@@ -62,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }).collect();
 
     // Print feed title if available
-    if let Some(title) = feed.title {
+    if let Some(ref title) = feed.title {
         println!("Feed Title: {}", title.content);
     }
 
@@ -74,8 +79,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    // Create app state
-    let mut app = App::new(episodes);
+    // Create app state with feed
+    let mut app = App::new(episodes, feed);
 
     // Run the application loop
     let res = run_app(&mut terminal, &mut app);
@@ -96,19 +101,15 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
         terminal.draw(|f| ui(f, app))?;
 
         if let Event::Key(key) = event::read()? {
-            // Only respond to key press events, not key release
             if key.kind == event::KeyEventKind::Press {
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Up => app.previous(),
                     KeyCode::Down => app.next(),
                     KeyCode::Char('d') => {
-                        if let Err(e) = download_selected_episode(app) {
-                            // Print error below the UI
-                            disable_raw_mode()?;
-                            stdout().execute(LeaveAlternateScreen)?;
-                            println!("Download error: {}", e);
-                            return Ok(());
+                        match download_selected_episode(app) {
+                            Ok(_) => app.status_message = Some("Download completed successfully".to_string()),
+                            Err(e) => app.status_message = Some(format!("Error: {}", e)),
                         }
                     }
                     _ => {}
@@ -122,10 +123,8 @@ fn download_selected_episode(app: &App) -> Result<(), Box<dyn std::error::Error>
     let selected_idx = app.list_state.selected().ok_or("No episode selected")?;
     let episode = &app.episodes[selected_idx];
     
-    // Get the enclosure URL from the feed
-    let content = std::fs::read_to_string("techmeme-ridehome.rss")?;
-    let feed = feed_rs::parser::parse(content.as_bytes())?;
-    let entry = feed.entries.get(selected_idx).ok_or("Entry not found")?;
+    // Use the stored feed instead of reading from file
+    let entry = app.feed.entries.get(selected_idx).ok_or("Entry not found")?;
     
     // Find the first enclosure (attachment) URL
     let url = entry.links.iter()
@@ -176,6 +175,20 @@ fn sanitize_filename(filename: &str) -> String {
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),  // Status line
+            Constraint::Min(0),     // List
+        ])
+        .split(f.area());
+
+    // Render status message if any
+    if let Some(msg) = &app.status_message {
+        let status = Line::from(msg.as_str());
+        f.render_widget(Paragraph::new(status), chunks[0]);
+    }
+
     let items: Vec<ListItem> = app
         .episodes
         .iter()
@@ -190,15 +203,30 @@ fn ui(f: &mut Frame, app: &mut App) {
         })
         .collect();
 
-    let selected_text = format!("Selected: {:?}", app.list_state.selected());
+    // Get the media filename for the selected episode
+    let title = match app.list_state.selected() {
+        Some(idx) => {
+            // Use the stored feed instead of reading from file
+            app.feed.entries.get(idx)
+                .and_then(|e| {
+                    e.links.iter()
+                        .find(|link| link.rel.as_deref() == Some("enclosure"))
+                        .map(|_| {
+                            let episode = &app.episodes[idx];
+                            episode.title.as_ref()
+                                .map(|t| sanitize_filename(t))
+                                .unwrap_or_else(|| format!("episode_{}.mp3", idx))
+                        })
+                })
+                .unwrap_or_else(|| "No media found".to_string())
+        }
+        None => "No episode selected".to_string(),
+    };
+
     let list = List::new(items)
-        .block(Block::default().title(selected_text).borders(Borders::ALL))
+        .block(Block::default().title(title).borders(Borders::ALL))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
 
-    f.render_stateful_widget(
-        list,
-        f.area(),
-        &mut app.list_state
-    );
+    f.render_stateful_widget(list, chunks[1], &mut app.list_state);
 }
