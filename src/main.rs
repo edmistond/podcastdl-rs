@@ -107,9 +107,12 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                     KeyCode::Up => app.previous(),
                     KeyCode::Down => app.next(),
                     KeyCode::Char('d') => {
-                        match download_selected_episode(app) {
+                        match download_selected_episode(app, terminal) {
                             Ok(_) => {} // Status message is already set in the function
-                            Err(e) => app.status_message = Some(format!("Error: {}", e)),
+                            Err(e) => {
+                                app.status_message = Some(format!("Error: {}", e));
+                                terminal.draw(|f| ui(f, app))?;
+                            }
                         }
                     }
                     _ => {}
@@ -119,7 +122,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
     }
 }
 
-fn download_selected_episode(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
+fn download_selected_episode(app: &mut App, terminal: &mut Terminal<impl Backend>) -> Result<(), Box<dyn std::error::Error>> {
     let selected_idx = app.list_state.selected().ok_or("No episode selected")?;
     let episode = &app.episodes[selected_idx];
     let entry = app.feed.entries.get(selected_idx).ok_or("Entry not found")?;
@@ -139,22 +142,22 @@ fn download_selected_episode(app: &mut App) -> Result<(), Box<dyn std::error::Er
     easy.url(url.as_str())?;
     easy.follow_location(true)?;
     easy.max_redirections(20)?;
-
-    // Get the progress function called
     easy.progress(true)?;
 
     let mut file = std::fs::File::create(&filename)?;
     
     app.status_message = Some(format!("Downloading {}... 0%", filename));
+    terminal.draw(|f| ui(f, app))?;
     
     {
         let mut transfer = easy.transfer();
         
-        // Set up progress callback
         transfer.progress_function(|total, current, _, _| {
             if total > 0.0 {
                 let percentage = (current / total * 100.0) as i32;
                 app.status_message = Some(format!("Downloading {}... {}%", filename, percentage));
+                // Force a redraw of the terminal
+                terminal.draw(|f| ui(f, app)).unwrap();
             }
             true
         })?;
@@ -168,6 +171,7 @@ fn download_selected_episode(app: &mut App) -> Result<(), Box<dyn std::error::Er
     }
 
     app.status_message = Some(format!("Downloaded {}", filename));
+    terminal.draw(|f| ui(f, app))?;
     Ok(())
 }
 
