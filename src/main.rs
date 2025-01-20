@@ -12,6 +12,8 @@ use std::io::{self, stdout, Write};
 use chrono::{DateTime, Utc};
 use curl;
 use feed_rs::model::Feed;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug)]
 struct Episode {
@@ -146,18 +148,26 @@ fn download_selected_episode(app: &mut App, terminal: &mut Terminal<impl Backend
 
     let mut file = std::fs::File::create(&filename)?;
     
-    app.status_message = Some(format!("Downloading {}... 0%", filename));
+    app.status_message = Some(format!("Downloading {}... 0% (press 'x' to cancel)", filename));
     terminal.draw(|f| ui(f, app))?;
+    
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let progress_flag = cancel_flag.clone();
+    let cancel_flag_clone = cancel_flag.clone();
     
     {
         let mut transfer = easy.transfer();
+        let filename_clone = filename.clone();
         
-        transfer.progress_function(|total, current, _, _| {
+        transfer.progress_function(move |total, current, _, _| {
+            // Check if we should cancel
+            if progress_flag.load(Ordering::Relaxed) {
+                return false;
+            }
+
             if total > 0.0 {
                 let percentage = (current / total * 100.0) as i32;
-                app.status_message = Some(format!("Downloading {}... {}%", filename, percentage));
-                // Force a redraw of the terminal
-                terminal.draw(|f| ui(f, app)).unwrap();
+                println!("\rDownloading {}... {}% (press 'x' to cancel)", filename_clone, percentage);
             }
             true
         })?;
@@ -167,7 +177,30 @@ fn download_selected_episode(app: &mut App, terminal: &mut Terminal<impl Backend
             Ok(data.len())
         })?;
 
-        transfer.perform()?;
+        // Spawn a thread to check for 'x' key press
+        std::thread::spawn(move || {
+            while !cancel_flag_clone.load(Ordering::Relaxed) {
+                if let Ok(Event::Key(key)) = event::read() {
+                    if key.kind == event::KeyEventKind::Press && key.code == KeyCode::Char('x') {
+                        cancel_flag_clone.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+        });
+
+        let result = transfer.perform();
+        
+        if cancel_flag.load(Ordering::Relaxed) {
+            drop(transfer);  // Explicitly drop the transfer before using app and terminal
+            app.status_message = Some(format!("Download of {} cancelled", filename));
+            terminal.draw(|f| ui(f, app))?;
+            // Clean up the partial file
+            std::fs::remove_file(&filename)?;
+            return Ok(());
+        }
+
+        result?;
     }
 
     app.status_message = Some(format!("Downloaded {}", filename));
