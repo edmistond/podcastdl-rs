@@ -108,7 +108,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
                     KeyCode::Down => app.next(),
                     KeyCode::Char('d') => {
                         match download_selected_episode(app) {
-                            Ok(_) => app.status_message = Some("Download completed successfully".to_string()),
+                            Ok(_) => {} // Status message is already set in the function
                             Err(e) => app.status_message = Some(format!("Error: {}", e)),
                         }
                     }
@@ -119,51 +119,55 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<
     }
 }
 
-fn download_selected_episode(app: &App) -> Result<(), Box<dyn std::error::Error>> {
+fn download_selected_episode(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     let selected_idx = app.list_state.selected().ok_or("No episode selected")?;
     let episode = &app.episodes[selected_idx];
-    
-    // Use the stored feed instead of reading from file
     let entry = app.feed.entries.get(selected_idx).ok_or("Entry not found")?;
     
-    // Debug print to see what media we have
-    println!("Media for episode:");
-    for media in &entry.media {
-        println!("  Content: {:?}", media.content);
-    }
-    
-    // Find the first media URL
     let url = entry.media.iter()
         .flat_map(|m| m.content.iter())
         .filter_map(|c| c.url.as_ref())
         .next()
         .ok_or("No download URL found")?;
 
-    // Create filename from title or use a default
     let filename = episode.title
         .as_ref()
         .map(|t| sanitize_filename(t))
         .unwrap_or_else(|| format!("episode_{}.mp3", selected_idx));
 
-    // Initialize curl with the URL as a string
     let mut easy = curl::easy::Easy::new();
-    easy.url(url.as_str())?;  // Convert Url to &str
+    easy.url(url.as_str())?;
     easy.follow_location(true)?;
     easy.max_redirections(20)?;
 
-    // Open file for writing
+    // Get the progress function called
+    easy.progress(true)?;
+
     let mut file = std::fs::File::create(&filename)?;
     
-    // Configure curl to write to our file
+    app.status_message = Some(format!("Downloading {}... 0%", filename));
+    
     {
         let mut transfer = easy.transfer();
+        
+        // Set up progress callback
+        transfer.progress_function(|total, current, _, _| {
+            if total > 0.0 {
+                let percentage = (current / total * 100.0) as i32;
+                app.status_message = Some(format!("Downloading {}... {}%", filename, percentage));
+            }
+            true
+        })?;
+
         transfer.write_function(|data| {
             file.write_all(data).unwrap();
             Ok(data.len())
         })?;
+
         transfer.perform()?;
     }
 
+    app.status_message = Some(format!("Downloaded {}", filename));
     Ok(())
 }
 
